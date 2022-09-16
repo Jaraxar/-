@@ -1,0 +1,148 @@
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  namespace: nodejs
+  name: nodejs-ingress
+spec:
+  rules:
+  - host: nodejs.example.com
+    http:
+      paths:
+      - backend:
+          serviceName: nodejs-srv
+          servicePort: 80
+        path: /
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: nodejs
+  namespace: nodejs
+  name: nodejs-srv
+spec:
+  type: NodePort
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+    protocol: TCP
+  selector:
+    app: nodejs
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: nodejs
+  name: nodejs
+  namespace: nodejs
+spec:
+  selector:
+    matchLabels:
+      app: nodejs
+  replicas: 3
+  template:
+    metadata:
+      labels:
+        app: nodejs
+    spec:
+      hostNetwork: false
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - nodejs
+            #Доступность, разнести по зонам.
+            topologyKey: failure-domain.beta.kubernetes.io/zone
+      containers:
+      - image: nodejs-app
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          #CPU 0.1  из расчета 8 процессорная система
+          requests:
+            cpu: 820m
+            memory: "128M"
+          limits:
+            cpu: 820m
+            memory: "128M"
+        name: nodejs-pod
+        ports:
+        - containerPort: 80
+
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: nodejs-app-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: nodejs
+  minReplicas: 1
+  #Согласно результатам нагрузочного теста
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: AverageValue
+          averageValue: 128Mi
+
+#autoscaler image kubectl + creditals to app
+---
+apiVersion: batch/v1beta1
+kind: CronJob
+metadata:
+  name: scale-up
+spec:
+  schedule: "0 9 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: hello
+            image: autoscaler
+            args:
+            - /bin/bash
+            - -c
+            - kubectl scale --replicas=3 deployment/nodejs
+          restartPolicy: OnFailure
+---
+apiVersion: batch/v1beta1
+kind: CronJob
+metadata:
+  name: scale-down
+spec:
+  schedule: "0 21 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: hello
+            image: autoscaler
+            args:
+            - /bin/bash
+            - -c
+            - kubectl scale --replicas=1 deployment/nodejs
+          restartPolicy: OnFailure
